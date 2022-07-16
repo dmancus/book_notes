@@ -2,8 +2,20 @@
 
 # Table Of Contents
   - [Part 1 - Foundations of Data Systems ](#part-1---foundations-of-data-systems)
+    - [Chapter 1: Reliable, Scalable, and Maintainable Applications](#chapter-1-reliable-scalable-and-maintainable-applications)
+    - [Chapter 2: Data Models and Query Languages](#chapter-2-data-models-and-query-languages)
+    - [Chapter 3: Storage and Retrieval](#chapter-3-storage-and-retrieval)
+    - [Chapter 4: Encoding and Evolution](#chapter-4-encoding-and-evolution)
   - [Part 2 - Distributed Data](#part-2---distributed-data)
+    - [Chapter 5: Replication](#chapter-5-replication)
+    - [Chapter 6: Transactions](#chapter-6-partitioning)
+    - [Chapter 7: Transactions](#chapter-7-transactions)
+    - [Chapter 8: The Trouble with Distributed Systems](#chapter-8-the-trouble-with-distributed-systems)
+    - [Chapter 9: Consistency and Consensus](#chapter-9-consistency-and-consensus)
   - [Part 3 - Derived Data](#part-3---derived-data)
+    - [Batch Processing](#chapter-10-batch-processing)
+    - [Stream Processing](#chapter-11-stream-processing)
+    - [The Future of Data Systems](#chapter-12-the-future-of-data-systems)
 
 
 # Part 1 - Foundations of Data Systems
@@ -1327,25 +1339,219 @@ SELECT * from bookings
   - Serializable snapshot isolation
 
 ## Chapter 8: The Trouble with Distributed Systems
+- Distributed systems have a lot more things that can go wrong than systems on a single computer
 ### Faults and Partial Failures
+- Single computer system should be basically deterministic, rarely partially broken
+- In distributed system, `partial failure` is more common, and they are `nondeterministic`
 #### Cloud Computing and Supercomputing
+- Two extremes of approaches for large scale systems: super computers vs cloud computing
+- Cloud computing has some challenges that a super computer/single node approach doesnt:
+  - internet-centric use cases are online/real time, so full reboot/downtime isn't viable
+  - need to use commodity parts which fail more often
+  - As systems get larger, we should assume that some piece of it is probably broken at all times or more often
+  - For distributed systems/internet apps, we assume communication over internet, while a supercomputer use case basically assumes everything is close by
+- You should assume faults will happen, they are not considered rare
 ### Unreliable Networks
+- shared nothing approaches are the mainstream approach for internet services as its relatively cheap and can achieve high reliability with redundancy in different datacenters
+- Most internal networks are `asynchronous packet networks`; lots of things can go wrong if you send a message and expect response:
+  - request is lost (cable unplugged)
+  - request gets stuck in a waiting queue
+  - remote node fails
+  - remote node stops responding but will respond later
+  - remote node processes request but reply gets lost
+  - remote node processes request but reply gets delayed
+- Make sure to specify a `timeout` to accommodate this, but then you need some good logic on what to do if you see timeouts
 #### Network Faults in Practice
+- network problems are quite common
+  - Public cloud services like EC2 are notorious for having transient network glitches
+  - A good private datacenter network can be more stable, but never perfect
+- Your software must be able to handle network faults
+  - not necessarily tolerating network failure; could be viable to just throw deliberate errors
 #### Detecting Faults
+- Many systems need to automatically detect faulty nodes
+  - Load balancer manages its nodes
+  - Distributed database with single-leader replication - need to know when to promote new leader
+- In limited cases we can get feedback to tell us something is broken
+  - If process crashed, then OS may return a RST/FIN packet and refuse the TCP connection
+  - If a process crashes or killed, you can have custom scripts that can then trigger messages to other nodes to notify them
+  - You can have access to some management interface and directly monitor network switches/hardware
+  - A router may reply with ICMP Destination Unreachable if it knows the target is down
+- For other cases it's hard to get feedback
+  - We can only assume success if we get an ack from the recipient
+  - Assume no reply if something goes wrong
 #### Timeouts and Unbounded Delays
+- How to set appropriate timeout value?
+  - Having a premature timeout value that declares nodes dead incorrectly may result in duplicating operations
+  - Also in cases where a node is slow/overloaded instead of dead, being premature can cause a knock-on effect to other nodes
+##### Network congestion and queueing
+- Packet delays can vary like traffic on roads
+  - Simultaneous packets to the same destination need to get queued on a switch.  This is called `network congestion`.  If the switch queue fills up, we get dropped packets and need a resend
+  - When packet arrives to target machine, if CPs are busy, then the OS must queue the incoming request until app can handle it
+  - VMs have an extra layer where the entire VM might be paused while another VM is using the CPU, and during this time the virtual machine monitor would have to queue the incoming data
+  - TCP has `flow control/congestion avoidance/backpressure` to stop sender from sending too much at once
+  - TCP retry looks like latency from application perspective
+- In public clouds/multi-tenant datacenters, noisy neighbors can become a problem
+- Need to tune the timeout values with experimentation
+- Better solution can be to have the system measure response times and variability (`jitter`) and adjust timeout based on that
+##### TCP Versus UDP
+- Some latency-sensitive apps like VoIP/video call use UDP instead of TCP
+- UDP is good choice when delayed data is useless
 #### Synchronous Versus Asynchronous Networks
+- Compare unreliable computer networks versus traditional land-line telephone connection
+  - Telephone call establishes a `circuit` - fixed guaranteed amount of bandwidth allocated for the call from end to end
+  - Because the bandwidth is pre-allocated, there is no queueing at any stage and it is a `synchronous` network
+  - End-to-end latency is fixed, aka `bounded delay`
+##### Can we not simply make network delays predictable?
+- If datacenter networks and internet were circuit-switched networks, we could have a synchronous network with maximum round-trip time
+- But ethernet/IP are packet-switched protocols that have queuing and unbounded delays; designed for bursty traffic
+  - On internet, we dont know ahead of time how much bandwidth we want/need for various use-cases
+- There are some attempts to provide some circuit-like behaviors with features like `quality of service` and `admission control` (rate limit senders)
+- Overall though we need to assume that network congestion and queuing will happen
 ### Unreliable Clocks
+- Applications rely on clocks to measure `duration` and `points in time`
+- Challenging in a distributed system where each system has its own clock
+- We use Network Time Protocol/NTP to synchronize clocks across computers
 #### Monotonic Versus Time-of-Day Clocks
+- Modern computers have two clocks
+  - `time-of-day` clock
+  - `monotonic` clock
+##### Time-of-day clocks
+- Returns the wall-clock time
+- Usually synchronized with NTP
+  - If the local clock is too far ahead of NTP server, it can be forced to reset and appear to go back in time
+##### Monotonic clocks
+- Good for measuring duration
+- Guaranteed to move forward
+- Absolute value is meaningless, only difference in two measurements is significant
+- NTP can cause `slewing` and move the monotonic clock forward at slightly different speed, but cannot allow jumps forward
 #### Clock Synchronization and Accuracy
+- quartz clock on computer drifts, depending on temp of machine - ~17 seconds of drift per day
+- If computer clock is too far from NTP time, it can refuse to synchronize or else jump forward or backward
+- Firewalls can accidentally block communication with NTP server
+- Sometimes NTP servers are misconfigured or totally wrong. clients try to query several servers and ignore totally wrong ones
+- VMs have a virtual hardware clock which is even harder to keep in sync when the VM can be paused
+- Apps running on a device you don't control could have totally untrustworthy clock
+- Can achieve good clock accuracy if its a priority
+  - MiFIDII EU regulation for financial institutions requires all HFT funds to synchronize clocks within 100microseconds of UTC
 #### Relying on Synchronized Clocks
+- Like network issues, we should assume that clocks will fail/misbehave
+- Clock issues are harder because they can easily be missed when they happen
+- If you have a process that relies on synchronized clocks, then you need infrastructure to monitor the clock offsets
+##### Timestamps for ordering events
+- Example buggy scenario
+  - Distributed database with multi-leader replication
+  - Each node will replicate its writes to other nodes along with a timestamp according to time-of-day clock from the originating node
+  - Each node may have some discrepancy in their own local clock
+  - Now a write that happens AFTER a previous write may appear to happen FIRST because of the clock discrepancy
+  - LWW approach can easily cause lost data
+- `logical clocks` based on counters are safer than physical clocks
+##### Clock readings have a confidence interval
+- Technically, reading a clock on a local system isn't a specific value due to drift, more of a range of possible values depending on how much drift has happened
+- Uncertainty will be the expected drift on your computer since last sync with NTP server, plus NTP's uncertainty, plus network round-trip time to server
+- Most systems ignore this uncertainty
+- Google has `TrueTime` API in Spanner which explicitly gives back a *[earliest, latest]* time span
+##### Synchronized clocks for global snapshots
+- Snapshot isolation feature relies on a monotonically increasing transaction ID
+- Difficult to generate a monotonically increasing ID on distributed database across multiple servers
+- Dangerous to use a time-of-day clock to try to generate these IDs
+- Google Spanner explicitly considers this case and looks at the `TrueTime` timestamps.  If there is any overlap in the confidence intervals, then it explicitly waits for the length of the confidence interval before committing
+- Also requires to keep clock uncertainty minimal so Google has a GPS receiver or atomic clock in each datacenter
 #### Process Pauses
+- Consider single leader replication system 
+  - How does leader know it has not been declared dead by other nodes
+  - Obtain a lease from other nodes, like a lock with timeout
+  - Naive approach can be to check the clock time, and if lease is about to expire, renew it
+  - But this can cause issues like what if the process pauses in this loop and by the time it tries to renew the lease, its expired on other nodes
+- Process pauses can happen from
+  - Garbage Collectors can sometimes cause applications to pause for a long time
+  - VMs can be suspended/resumed
+  - End-user devices can be suspended, like laptop being closed
+  - Synchronous disk access can pause a thread
+  - memory swapping/paging can cause thread to pause while waiting to access data in the swap space
+- On single node systems, we have tools like mutexes, semaphores, atomic counters, lock-free data structures, blocking queues to help deal with this
+- On distributed system we have no shared memory so we just have to assume that processes can be paused and the rest of the world keeps going
+##### Response time guarantees
+- Some systems must eliminate pauses
+  - aircraft control, rockets, robots, cars, etc
+- Specify a *deadline* by which software must respond.  If no response, then declare failure
+- `Real-time operating system` (RTOS) allows processes to be scheduled with guaranteed allocation of CPU time; dynamic memory allocations are restricted or disallowed. Lots of testing needed
+- Drastically reduces the languages/libraries/tools that can be used
+- In most cases, real-time guarantees are not worth it
+##### Limiting the impact of garbage collection
+- Recent approach
+  - Treat GC pauses like brief planned outages
+  - Runtime warns the application that node needs GC pause soon, then app stops sending requests to that node
+- Alternatively use GC only for short lived objects and to restart processes periodically before you need a full GC of long-lived objects
 ### Knowledge, Truth, and Lies
 #### The Truth Is Defined by the Majority
+- In a distributed system you can never rely on a single node.  Instead we rely on `quorum` aka voting
+##### The leader and the lock
+- Common challenge: need to have "only one" of something, like only one leader or only one process can access something at a time
+- Example: Distributed system uses lock leases to access a resource, but then one node hits a Garbage Collector pause and doesn't realize its lease expired, and now two processes think they have a lease
+##### Fencing tokens
+- `Fencing token` is an increasing number each time a lock lease is granted.  Client sends the write request along with the fencing token.  Writes can never have a lower fencing token than the most recent write.
+- Server must do the work to check the fencing token
 #### Byzantine Faults
+- What happens if nodes are lying instead of just making mistakes
+- `Byzantine fault-tolerant` - system operates correctly even when nodes are malfunctioning or if malicious actors are interfering with network
+  - Aerospace - memory or cpu registers could get corrupted by radiation
+  - Multiple participating organizations - some organizations may try to cheat, e.g. bitcoin
+- Protocols for making systems byzantine fault tolerant are complicated and usually not needed
+##### Weak forms of lying
+- Sometimes its worth protecting against weak forms of "lying" like invalid messages from hardware issues, bugs or misconfiguration
+- Examples
+  - Network packet corruption from hardware issues
+  - Bad inputs from users
+  - NTP clients talking to multiple NTP servers can ignore one bad server if its off
 #### System Model and Reality
+- We must build a system model that describes what assumptions we can have
+- Timing assumptions
+  - `Synchronous model` - assume bounded network delay, bounded process pauses, and bounded clock error.  Not a realistic model
+  - `Partially synchronous model` - system behaves like a synchronous system most of the time, but sometimes exceeds the bounds of delays.  Pretty realistic in most cases
+  - `Asynchronous model` - No timing assumptions are allowed.  No clocks or timeouts even exist. 
+- Node Failures
+  - `Crash-stop faults` - assume a node can only fail by crashing
+  - `Crash-recovery faults` - Node may crash, and maybe start responding again later.  Assume nodes have stable storage that can be saved, and in-memory data gets lost
+  - `Byzantine (arbitrary) faults` - Nodes can do anything including trying to lie and trick other nodes
+- Usually we want to assume partially synchronous model with crash-recovery faults
+##### Correctness of an algorithm
+- We need to describe `properties` of an algorithm in order to be able to say what is `correct` for the algorithm
+##### Safety and liveness
+- Distinguish between `safety` properties and `liveness` properties
+  - Examples of safety properties: system requires uniqueness or monotonic sequence
+  - Examples of liveness properties: availability.  Usually includes "eventually" in the definition
+- Safety = nothing bad happens
+- Liveness = something good eventually happens
+- When designing distributed system, safety properties must *always* hold
+- Liveness properties can have caveats like request needs to receive response only if a majority of nodes have not crashed
+##### Mapping system models to the real world
 ### Summary
+- Discussed wide range of problems like
+  - When sending network, it can be lost or delayed.  Can't tell whether it was lost or delayed
+  - Node's clock may be out of sync with other nodes
+  - Process can pause for long periods of time, often due to GC
+- Partial failures are a key challenge in distributed systems
 
 ## Chapter 9: Consistency and Consensus
+- Will dive into some algorithms and protocols to build fault-tolerant systems
+- Find general-purpose abstractions with good guarantees, then let applications rely on that
+  - Example: `consensus`
+### Consistency Guarantees
+### Linearizability
+#### What Makes a System Linearalizable?
+#### Relying on Linearizability
+#### Implementing Linearizable Systems
+#### The Cost of Linearizability
+### Ordering Guarantees
+#### Ordering and Causality
+#### Sequence Number Ordering
+#### Total Order Broadcast
+### Distributed Transactions and Consensus
+#### Atomic Commit and Two-Phase Commit (2PC)
+#### Distributed Transactions in Practice
+#### Fault-Tolerant Consensus
+#### Membership and Coordination Services
+### Summary
 
 
 # Part 3 - Derived Data
