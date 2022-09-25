@@ -1537,24 +1537,333 @@ SELECT * from bookings
 - Find general-purpose abstractions with good guarantees, then let applications rely on that
   - Example: `consensus`
 ### Consistency Guarantees
+- Eventual consistency is a very weak guarantee, doesn't tell us when systems will converge
+- Let's explore some stronger guarantees, although they come with tradeoffs like worse performance
 ### Linearizability
-#### What Makes a System Linearalizable?
+- `linearizability` aka `atomic consistency` aka `strong consistency` aka `immediate consistency` aka `external consistency`
+- Make it *look*  like there is only one replica, you get same results regardless of where you query
+- As soon as a client successfully completes a write, all clients reading from db must see the value just written
+#### What Makes a System Linearizable?
+- One challenge of linearizability is what happens if a write takes place for some *duration* of time instead of at a specific instant
+  - During the time the write is happening, other reads could see the old value OR the new value.  This violates lineariability
+  - We must ensure that once a read sees a new value, all reads see the new value
+- We need a `compare-and-set` operator that can atomically update a value only if the old value is what the client thinks it is
+- In a linearizable system, we must model all writes to happen at some specific instant; all reads afterward see the new value even if the write is technically still processing
+- We can line up all operations against a given `register` and make sure that the sequence of reads and writes is valid
+##### Linearizability Versus Serializability
+- Serializability - isolation property of transactions that can touch multiple objects.  It guarantees that transactions behave as if they executed in some order, but could be different from the real life order
+- Linearizability - recency guarantee on reads and writes of a register aka one object only.  Does not group operations into transactions and doesn't solve things like skew
 #### Relying on Linearizability
+##### Locking and leader election
+- Single-leader replication systems must make sure there is only one leader.  The lock must be linearizable, all nodes must agree on who has the lock
+##### Constraints and uniqueness guarantees
+- If you need data guarantees like guaranteeing no duplicate filenames you need linearizability
+- Similar idea if you need to guarantee a bank account doesn't go negative
+- Unique constraints in database need linearizability
+##### Cross-channel timing dependencies
+- Systems that rely on parallel flows can rely on linearizability to avoid race conditions
+- Example
+  - Photo upload website
+    - user uploads photo
+    - message is sent onto a work queue to go to a "image resizer" service
+    - message also gets sent on to a file storage service
+    - Later, the image resizer will need to fetch the photo from the storage service, but could arrive faster than the full image
 #### Implementing Linearizable Systems
+- How to make a system linearizable but not literally have just one copy of data?
+- Rely on replication
+  - Single-leader replication - *may* be linearizable
+    - Need to ensure that you definitely know who the leader is
+  - Consensus algorithms - Linearizable - have measures to avoid split brain/stale replicas
+  - Multi-leader replication - NOT linearizable - Writes on multiple nodes asynchronously send data to each other and require conflict resolution
+  - Leaderless replication - probably not linearizable
+    - w + r > n should allow for strong consistency, but not quite true
+    - Last write wins conflict resolution based on time-of-day clocks are not linearizable because of clock skew
+##### Linearizability and quorums
+- Quorum read writes can still have non-linearizable edge case
+- Example:
+  - write tries to write, and the new data only goes to 1 of 3 nodes, takes much longer to get to other 2 nodes
+  - Writes that happen while the write is in progress can see the old or the new value, so this is not linearizable
+- We *can* make this quorum linearizable by forcing the reader to do read repair synchronously
 #### The Cost of Linearizability
+- Single leader replication can have linearizability while multi leader replication cannot
+- However in multi datacenter or multi region deployment we often use multi-leader replication to save uptime
+- If we rely on single leader replication for serializability, then if that datacenter goes down, our app is down
+##### The CAP theorem
+- If your system *needs* linearizability, then system must be unavailable during network issues
+- If your system does not require linearizability, then you can make it possible to process requests independently and keep system available during network issues
+##### The Unhelpful CAP Theorem
+- Sometimes presented as pick 2 out of 3 from Consistency, Availability and Partition tolerance
+  - But you have no choice, net work partitions happen no matter what
+- When network fault happens, you must choose between linearizability or total availability
+- Better definition is Consistent or Available when Partitioned
+##### Linearizability and network delays
+- Even RAM on a modern multi-core CPU is not linearizable due to cache behavior occasionally meaning we read stale values
+- The reason to drop linearizability is for performance reasons
 ### Ordering Guarantees
+- Causality imposes an ordering of events; cause comes before effect
 #### Ordering and Causality
+##### The causal order is not a total order
+- Total order allows any 2 elements to be compared, e.g. 5 vs 13
+- Mathematical sets cannot be compared, how can you decide if { a, b } is greater than { b, c }? We call this *partiall ordered*
+- `Linearizability` - We have a *total order* of operations
+- `Causality` - We only get *partial ordering* because we only order things if they are causally related.  Otherwise we call them concurrent.
+##### Linearizability is stronger than causal consistency
+- Any system that is linearizable is causally consistent
+- Linearizability is easy to understand and appealing, but carries performance penalties
+- But we can make a system causally consistent without requiring full linearizability, this is promising area of research
+##### Capturing causal dependencies
+- The key thing for causality is that we must describe what we "know" about the system in order to make a write
+- We have similar strategies when discussing leaderless replication earlier
+- Version Vectors are useful for this
 #### Sequence Number Ordering
+- We can use a `sequence number` or `timestamp` to order events
+- Doesn't have to be wall-clock timestamp, but can be logical clock
+##### Noncausal sequence number generators
+- Difficult to generate sequence numbers when we have multi-leader setup
+  - Each node can generate independent set of numbers, like node1 uses evens and node2 uses odds
+  - We can use time-of-day clock and attach to operations to help with things like LWW
+  - Pre-allocate blocks of numbers to different nodes
+- These 3 options all work and are better performance than a single leader, but they are not consistent with causality
+##### Lamport timestamps
+- Each node has a unique identifier
+- Each node keeps counter of the number of operations it has processed
+- `Lamport timestamp` is the pair of counter + node ID
+- When comparing Lamport timestamps, rules are:
+  - higher counter value is bigger timestamp
+  - if counter is same, higher node ID is bigger timestamp
+- Each node and each client keeps track of max counter value it has seen, and includes that number in every request
+- Any node that receives any kind of request must immediately update its own internal counter to the new maximum if a higher value comes in
+- This means that other nodes will jump their next value to be larger than the latest value and helps guarantee causality
+##### Timestamp ordering is not sufficient
+- This ordering still is not sufficient for a problem like deciding if a unique username can be created or not
+- It's not enough to be able to decide the order of operations after the fact; we must decide synchronously if the create request should work or not
 #### Total Order Broadcast
+- How can we scale up a single leader system if throughput is high, and how to handle failover
+- This is called `total order broadcast` or `atomic broadcast`
+- Two properties must be satisfied
+  - Reliable delivery - Messages cannot be lost, they must get delivered to all nodes
+  - Total ordered delivery - Messages must be delivered in the same order
+##### Using total order broadcast
+- Zookeeper and etcd implement total ordered broadcast
+- Order is fixed at the time the messages are delivered, you cannot change the order afterward
+##### Implementing linearizable storage using total order broadcast
+- Linearizability and total order broadcast are not the same thing but closely linked
+  - TOB - no guarantee on when message will arrive, only that order will be preserved
+  - Linearizability - reads are guaranteed to see latest value written
+- Total Order Broadcast allows you to build linearizable storage on top
+- E.G. Implement a "register unique username" logic
+  - Implement a compare-and-set operation by treating the total order broadcast as an append-only log
+  - Add a message to the log to try to claim username
+  - Read the log and wait until you get your write
+  - If anyone else has claimed the username before your own, you have conflict.  If not, you get the username
+- This guarantees linearizable writes but not reads, reads might be stale
+- If you want linearizable reads, some options are:
+  - add your reads into the log and basically turn it into a write.  Only return results once you see your own message for your read come through in the log
+  - If you have a way to fetch the latest log message in a linearizable way, you can query that position and wait for all entries up to that position to be delivered, then do the read.  This is used by ZooKeeper sync() function
+  - Read from a replica that is synchronously updated on writes
+##### Implementing total order broadcast using linearizable storage
+- Imagine a linearizable register that stores an integer and has atomic increment-and-get operation
+- For each message you want to send through total order broadcast, increment-and-get the integer and attach the value from the register as a sequence number to the message
+- Send message to all nodes
+- Unlike Lamport timestamps, numbers will have no gaps, so if we are at 4 and we receive 6, we know we should wait for 5 before applying 6
+- How do we get a atomic increment-and-get operation? We need a consensus algorithm
 ### Distributed Transactions and Consensus
+- Scenarios where we need consensus:
+  - `Leader election` - Single leader replication must avoid split-brain scenario
+  - `Atomic commit` - Multi-node database must ensure that transactions wont fail only on some nodes
 #### Atomic Commit and Two-Phase Commit (2PC)
+- Especially important for multi-object updtes, or databases with secondary indexes that are a separate data structure from the primary data
+##### From single-node to distributed atomic commit
+- In single node setting, rely on storage engine and use the WAL for durability
+- The instant the disk finishes writing the commit record is when the write completes
+- This doesn't work if you need to update on multiple nodes within a transaction
+##### Introduction to two-phase commit
+- 2PC uses new component that is not in single-node setup: `coordinator`
+- Coordinator cannot be a separate process or service, it may be a library within the same application process
+- Application reads/writes data on nodes as normal - `participants`
+- When commit time comes, coordinator starts phase 1
+  - send `prepare` request to each node to see if they can commit
+  - If response is `yes` send the `commit` request in phase 2
+  - If any participant says `no`, the `abort` request is sent to participants
+##### A system of promises
+- More detail
+  - When app begins transaction, it gets a transaction ID from coordinator which is globally unique
+  - Each node starts a single-node transaction and associates it to the unique transaction ID
+  - When coordinator sends prepare request with the global transaction ID, if any participant fails or times out, it can abort
+  - When participant receives prepare request it will make sure it can commit for sure
+  - When coordinator receives all responses, it makes the final decision, called `commit point`
+  - Once decision is written to disk, the commit or abort is sent to all participants.  Any failures must be retried forever until successful
+- Two special points:
+  - If a participant votes yes, it promises to commit later no matter what
+  - When coordinator decides, it cannot be undone
+##### Coordindator failure
+- What happens when participant votes yes but then coordinator fails?  Participant is not allowed to just abort or timeout
+- The only way forward is to wait for the coordinator to recover and send through the commit message
+##### Three-phase commit
+- 2PC is called `blocking` atomic commit protocol since we must wait on coordinator if it crashes
+- 3PC is proposed to avoid blocking, but it is not so realistic as it relies on
+  - network with `bounded delays`
+  - `perfect failure detector`
+- Because of this, 2PC is still used
 #### Distributed Transactions in Practice
+- 2PC has mixed reputation due to bad performance and operational challenges
+- Get precise about what we mean by distributed transaction
+  - `Database-internal distributed transactions` - Distributed DB supports transactions among nodes of the db
+  - `Heterogenous distributed transactions` - 2 different technologies or components are participating in a transaction.  Can be much more challenging than database-internal distributed transactions
+##### Exactly-once message processing
+- Example - message from MQ can be considered processed iff the db transaction was successfully committed
+- To achieve this we must atomically commit the message acknowledgement and the db writes in one single transaction
+- If either piece fails, we must rollback
+- Need to consider side-effects, such as send-email when receiving a message; don't do the side-effect until we have truly committed
+##### XA transactions
+- `X/Open XA` - standard to implement 2PC across heterogenous technologies
+- Supported by relational DBs like Postgres, MySQL, DB2, MSSQL, Oracle, and MQ like IBM MQ, Active MQ
+- XA is not a network protocol, it is a C API to interface with transaction coodinator
+- Java supports Java Transaction API aka JTA
+- XA assumes app uses a network driver or client library to communicate with participating dbs or messaging services
+- Driver should support XA, and it can call XA API to find out if operation is part of a distributed transaction
+- Application will act as coordinator and should use the XA API
+- If application crashes, the participants with prepared transactions  must wait for it, and the app must come back and read the log and do the retry to make sure participants aren't stuck forever
+##### Holding locks while in doubt
+- If a transaction is stuck in doubt, then all exclusive locks for writes and shared locks for reads are also stuck until this is resolved
+- This causes blocking in the application
+##### Recovering from coordinator failure
+- Theoretically, coordinator should cleanly recover state from log and resolve in-doubt transactions
+- In reality, `orphaned` in-doubt transactions can happen and cause blocking
+- administrator must manually decide whether to commit or rollback, usually in the most stressful situation
+- Many XA implementations offer a `heuristic decision` which lets participants decide on their own to abort or commit in-doubt transaction even without decision from coordinator.  This probably breaks atomicity
+##### Limitations of distributed transactions
+- Transaction coordinator is itself a kind of "sub-database" of its own and needs to have similar considerations to other important databases
+  - If coordinator isn't replicated, it is a SPOF
+  - Many apps like to have stateless application and delegate state to the database.  But if coordinator is in the application, this is broken and you now have critical state on the application side
+  - 2PC is more brittle since any failing component causes transactions to fail
 #### Fault-Tolerant Consensus
+- One or more nodes may `propose` values, and the consensus algorithm `decides` on those values
+- Consensus algorithm has following requirements:
+  - `Uniform agreement` - nodes do not decide differently
+  - `Integrity` - no node decides twice
+  - `Validity` - If a node decides value `v`, then `v` was proposed by some node
+  - `Termination` - Every node that does not crash eventually decides some value
+- 2PC does not meet the requirements for termination since we wait on crashed nodes
+##### Consensus algorithms and total order broadcast
+- Well known fault-tolerant consensus algorithms:
+  - Viewstamped Replication (VSR)
+  - Paxos
+  - Raft
+  - Zab
+- These algorithms are total order broadcast algorithms and decide on `sequence` of values
+##### Single-leader replication and consensus
+- Single leader replication can be kind of like a dictatorial total order broadcast
+- However it doesn't satisfy `termination` since if the leader goes down, you need intervention to choose new leader (assuming manual failover)
+- Automatic failover *would* fix the termination issue, but runs into a circular issue because you need some consensus algorithm to elect a leader, but this is a single-leader system that is losing its leader
+##### Epoch numbering and quorums
+- All consensus algorithms need some kind of leader, but it doesn't have to be unique
+- Define a `epoch number`, and guarantee a unique leader for that epoch
+- Any time we think a leader is dead, nodes must vote to elect a leader using an incremented `epoch number`
+- epoch numbers are monotonically increasing, so anytime we have potentially two leaders, the leader from the higher epoch number wins
+- For all decisions that a leader wants to make, it will send the proposed value to other nodes and wait for quorum of nodes to respond in favor
+  - quorum should usually have a majority of nodes
+  - node should only vote in favor of proposal if it doesn't know of a leader with higher epoch
+  - effectively two rounds of voting:
+    - choose a leader
+    - vote on leader's proposal
+  - for a vote to succeed, at least one node that votes for it must also have participated in most recent leader election
+- This is similar to 2PC commit concepts, except that in 2PC the coordinator is not elected
+##### Limitations of consensus
+- Voting protocols are a kind of synchronous replication
+- Consensus protocols need a majority to work, so you need 3 nodes to tolerate 1 failure or 5 nodes to tolerate 2 failures
+- Changing number of nodes in a system can be difficult, usually you assume its a fixed number of nodes
+- We rely on network timeouts to detect failed nodes.  Varying network delays can mean lots of leader elections which causes bad performance
 #### Membership and Coordination Services
+- Zookeeper and etcd are often used in the background for other products like HBase, Hadoop YARN, OpenStack Nova, Kafka
+- They are designed to hold small amounts of data that can fit in memory, which is replicated across all nodes using fault-tolerant total order broadcast
+- Other useful features:
+  - `Linearizable atomic operations` - atomic compare-and-set method allows you to implement a lock
+  - `Total ordering of operations` - When a resource is protected by a lock or lease, you need a fencing token to prevent clients from conflicting with each other.  ZooKeeper provides this by totally ordering all operations with a transactionID and version number (zxid and cversion)
+  - `Failure detection` - ZooKeeper and clients keep active connection and do heartbeats to check if alive.  If heartbeat stops for some time, ZooKeeper declares session to be dead
+  - `Change notifications` - Clients can watch locks and values written from other nodes for changes.  You can find out when another client joins the cluster or fails.  
+##### Allocating work to nodes
+- One use-case is in an application with multiple instances, and one needs to be chosen as leader or primary
+- Useful for single-leader databases, but also for job schedulers and similar stateful systems
+- Another use-case is with partitioned resources like databases, and you need to decide which partition to assign to a node
+- Voting can have bad performance if your service goes up to thousands of nodes.  Instead of having the application do that, you can maintain a standard 3/5 node ZooKeeper and delegate voting to happen within ZooKeeper
+##### Service discovery
+- In cloud environments, individual nodes come and go, so you can configure services to register their network endpoints in a service registry at startup time
+- service discovery does not need consensus but leader election does
+##### Membership services
+- determines which nodes are currently active and live members of a cluster
 ### Summary
+- Linearizability is a popular consistency model - make replicated data appear as if there were only one copy and make operations act on it atomically
+- Causality - imposes ordering on events in a system
+- Consensus means deciding something in a way that all nodes agree on what was decided, and this decision is irrevocable
+- Several different problems can all boil down to consensus problems:
+  - Linearizable compare-and-set registers
+  - Atomic transaction commit
+  - Total order broadcast
+  - Locks and leases
+  - Membership/coordination service
+  - Uniqueness constraint
+- Consensus is easy in single leader system, but then has problem if leader fails
+- 3 ways to handle leader failure
+  - wait for leader to recover
+  - manually failover
+  - use an algorithm to choose new leader
+- single-leader database can provide linearizability without consensus on writes, but still needs consensus to keep leadership
+- ZooKeeper can "outsource" consensus, failure detection, and membership service
 
 
 # Part 3 - Derived Data
+### Systems of Record and Derived Data
+- At high level we can group data systems into two categories
+  - Systems of record - aka source of truth
+  - Derived data systems - takes systems from another system and transforms it some way.  e.g. cache
+
 ## Chapter 10: Batch Processing
+### Batch Processing with Unix Tools
+#### Simple Log Analysis
+#### The Unix Philosophy
+### MapReduce and Distributed Filesystems
+#### MapReduce Job Execution
+#### Reduce-Side Joins and Grouping
+#### Map-Side Joins
+#### The Output of Batch Workflows
+#### Comparing Hadoop to Distributed Databases
+### Beyond MapReduce
+#### Materialization of Intermediate State
+#### Graphs and Iterative Processing
+#### High-Level APIs and Languages
+### Summary
+
 ## Chapter 11: Stream Processing
+### Transmitting Event Streams
+#### Messaging Systems
+#### Partitioned Logs
+### Databases and Streams
+#### Keeping Systems in Sync
+#### Change Data Capture
+#### Event Sourcing
+#### State, Streams and Immutability
+### Processing Streams
+#### Uses of Stream Processing
+#### Reasoning About Time
+#### Stream Joins
+#### Fault Tolerance
+### Summary
+
 ## Chapter 12: The Future of Data Systems
+### Data Integration
+#### Combining Specialized Tools by Deriving Data
+#### Batch and Stream Processing
+### Unbundling Databases
+#### Composing Data Storage Technologies
+#### Designing Applications Around Dataflow
+#### Observing Derived State
+### Aiming for Correctness
+#### The End-to-End Argument for Databases
+#### Enforcing Constraints
+#### Timeliness and Integrity
+#### Trust, but Verify
+### Doing the Right Thing
+#### Predictive Analytics
+#### Privacy and Tracking
+### Summary
